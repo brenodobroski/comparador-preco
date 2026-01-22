@@ -25,9 +25,15 @@ const MarketScraper = () => {
     const script = document.createElement('script');
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
     script.async = true;
-    script.onload = () => setXlsxLoaded(true);
+    script.onload = () => {
+        console.log("Biblioteca XLSX carregada!");
+        setXlsxLoaded(true);
+    };
+    script.onerror = () => {
+        setError("Erro ao carregar biblioteca de Excel. Verifique sua internet.");
+    };
     document.body.appendChild(script);
-    return () => { document.body.removeChild(script); }
+    // Não removemos o script no cleanup para evitar recarregamento desnecessário
   }, []);
 
   const STORES = {
@@ -77,6 +83,7 @@ const MarketScraper = () => {
     // Função auxiliar para adicionar item
     const addItem = (item) => {
         if (!item.link || seenIds.has(item.link)) return;
+        // Filtro Crítico: Preço deve ser maior que zero
         if (!item.precoVista || item.precoVista <= 0) return;
         
         seenIds.add(item.link);
@@ -84,7 +91,6 @@ const MarketScraper = () => {
     };
 
     // ESTRATÉGIA 1: VISUAL (DOM) - Focado nos cards da Leveros
-    // Seleciona os cards baseados nas classes que vimos no seu código
     const cards = doc.querySelectorAll('.product-card, .vtex-product-summary-2-x-container');
     
     cards.forEach(card => {
@@ -92,13 +98,11 @@ const MarketScraper = () => {
         const linkEl = card.querySelector('a'); 
         const imgEl = card.querySelector('img');
         
-        // Seletores de preço específicos da Leveros
         const priceEl = card.querySelector('.prices__price');
         const installmentEl = card.querySelector('.installment'); 
 
         if (nameEl && linkEl) {
             let link = linkEl.getAttribute('href');
-            // Corrige link relativo
             if (link && !link.startsWith('http')) {
                 link = `https://www.leveros.com.br${link.startsWith('/') ? '' : '/'}${link}`;
             }
@@ -106,13 +110,10 @@ const MarketScraper = () => {
             let pVista = 0;
             let pParcelado = 0;
 
-            // Extração Preço à Vista (Ex: R$ 5.129,05)
             if (priceEl) {
-                // Limpa tudo que não é digito ou virgula
                 const cleanPrice = priceEl.innerText.replace(/[^\d,]/g, '').replace(',', '.');
                 pVista = parseFloat(cleanPrice);
             } else {
-                // Fallback: Tenta achar no texto do card todo
                 const matches = card.innerText.match(/R\$\s?([\d\.]+,\d{2})/g);
                 if (matches) {
                     const values = matches.map(m => parseFloat(m.replace(/[^\d,]/g, '').replace(',', '.')));
@@ -120,9 +121,7 @@ const MarketScraper = () => {
                 }
             }
 
-            // Extração Preço Parcelado
             if (installmentEl) {
-                // Lógica: "8x de R$ 674,88"
                 const match = installmentEl.innerText.match(/(\d+)x.*?R\$\s*([\d\.,]+)/);
                 if (match) {
                     const parcelas = parseInt(match[1]);
@@ -131,14 +130,13 @@ const MarketScraper = () => {
                 }
             }
 
-            // Fallbacks de preço
             if (pParcelado === 0) pParcelado = pVista;
             if (pVista === 0 && pParcelado > 0) pVista = pParcelado;
 
             addItem({
                 id: link,
                 nome: nameEl.innerText.trim(),
-                codigo: "N/A", // Não visível no card
+                codigo: "N/A", 
                 marca: "Leveros",
                 link: link,
                 precoVista: pVista,
@@ -150,7 +148,6 @@ const MarketScraper = () => {
     });
 
     // ESTRATÉGIA 2: JSON-LD (Complementar)
-    // Se o visual falhar ou para pegar mais dados
     const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
     scripts.forEach(script => {
         try {
@@ -179,7 +176,6 @@ const MarketScraper = () => {
             if (Array.isArray(json)) {
                 json.forEach(item => {
                     processObj(item); 
-                    // Se for lista
                     if (item.itemListElement) item.itemListElement.forEach(el => processObj(el.item));
                 });
             } else {
@@ -210,7 +206,7 @@ const MarketScraper = () => {
         if (activeTab === 'leveros') {
             extractedItems = parseLeverosHTML(manualHtml);
         } else {
-            extractedItems = parseLeverosHTML(manualHtml); // Genérico
+            extractedItems = parseLeverosHTML(manualHtml); 
         }
 
         if (extractedItems.length > 0) {
@@ -314,7 +310,9 @@ const MarketScraper = () => {
         }
 
         if (newData.length > 0) {
-            allCollectedItems = [...allCollectedItems, ...newData];
+            // Filtro aqui também para garantir
+            const validData = newData.filter(p => p.precoVista > 0);
+            allCollectedItems = [...allCollectedItems, ...validData];
             setProducts([...allCollectedItems]);
             calculateStats(allCollectedItems);
             page++;
@@ -352,27 +350,39 @@ const MarketScraper = () => {
   };
 
   const downloadExcel = () => {
-    if (!products.length || !window.XLSX) return;
-    const storeName = STORES[activeTab].name;
+    try {
+        if (!products.length) {
+            alert("Nenhum produto para baixar.");
+            return;
+        }
+        
+        if (!window.XLSX) {
+            alert("Erro: Biblioteca Excel (SheetJS) não carregou. Tente recarregar a página.");
+            return;
+        }
 
-    const dataForExcel = products.map(p => ({
-        "Loja": storeName,
-        "Nome do Produto": p.nome,
-        "Marca": p.marca,
-        "Referência": p.codigo,
-        "Preço à Vista (R$)": p.precoVista,
-        "Preço Parcelado (R$)": p.precoParcelado,
-        "Disponível": p.disponivel ? "Sim" : "Não",
-        "Link": p.link
-    }));
+        const storeName = STORES[activeTab].name;
 
-    if (window.XLSX) {
+        const dataForExcel = products.map(p => ({
+            "Loja": storeName,
+            "Nome do Produto": p.nome,
+            "Marca": p.marca,
+            "Referência": p.codigo,
+            "Preço à Vista (R$)": p.precoVista,
+            "Preço Parcelado (R$)": p.precoParcelado,
+            "Disponível": p.disponivel ? "Sim" : "Não",
+            "Link": p.link
+        }));
+
         const ws = window.XLSX.utils.json_to_sheet(dataForExcel);
         const wscols = [{wch: 10}, {wch: 50}, {wch: 15}, {wch: 20}, {wch: 15}, {wch: 15}, {wch: 10}, {wch: 60}];
         ws['!cols'] = wscols;
         const wb = window.XLSX.utils.book_new();
         window.XLSX.utils.book_append_sheet(wb, ws, "Dados");
         window.XLSX.writeFile(wb, `${activeTab}_${Date.now()}.xlsx`);
+    } catch (e) {
+        console.error("Erro Excel:", e);
+        alert("Erro ao gerar arquivo. Verifique o console.");
     }
   };
 
