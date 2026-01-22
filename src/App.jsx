@@ -35,7 +35,7 @@ const MarketScraper = () => {
       name: "Clima Rio",
       baseUrl: "https://www.climario.com.br",
       defaultLink: "https://www.climario.com.br/ar-condicionado/ar-condicionado-multi-split",
-      method: "API", // Automático
+      method: "API", 
       colorClass: "text-blue-600",
       bgClass: "bg-blue-600",
       lightBg: "bg-blue-50",
@@ -45,7 +45,7 @@ const MarketScraper = () => {
       name: "Leveros",
       baseUrl: "https://www.leveros.com.br",
       defaultLink: "https://www.leveros.com.br/ar-condicionado/multi-split",
-      method: "MANUAL", // Manual por padrão devido ao bloqueio
+      method: "MANUAL", 
       colorClass: "text-orange-600",
       bgClass: "bg-orange-600",
       lightBg: "bg-orange-50",
@@ -53,7 +53,6 @@ const MarketScraper = () => {
     }
   };
 
-  // Ativa modo manual automaticamente para Leveros
   const handleTabChange = (storeKey) => {
     setActiveTab(storeKey);
     setTargetLink(STORES[storeKey].defaultLink);
@@ -61,8 +60,6 @@ const MarketScraper = () => {
     setStats({ total: 0, mediaPreco: 0, semEstoque: 0 });
     setError(null);
     setProgress("");
-    
-    // Se for Leveros, sugere manual direto
     if (storeKey === 'leveros') {
         setUseManualInput(true);
     } else {
@@ -70,120 +67,125 @@ const MarketScraper = () => {
     }
   };
 
-  // --- PARSERS INTELIGENTES ---
-
+  // --- PARSER LEVEROS CORRIGIDO ---
   const parseLeverosHTML = (html) => {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
     const items = [];
-    const seenIds = new Set(); // Evitar duplicatas por ID ou Link
+    const seenIds = new Set(); 
 
-    // --- ESTRATÉGIA 1: DADOS ESTRUTURADOS (JSON-LD) ---
-    // O código que você mandou tem um array raiz com vários objetos Product.
-    const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
-    
-    scripts.forEach(script => {
-        try {
-            const json = JSON.parse(script.innerText);
-            
-            // Função auxiliar para extrair de um objeto único
-            const extractFromJson = (obj) => {
-                if (obj && obj['@type'] === 'Product') {
-                    const link = obj.offers?.url || obj.url || "";
-                    if (seenIds.has(link)) return; // Já pegamos
+    // Função auxiliar para adicionar item
+    const addItem = (item) => {
+        if (!item.link || seenIds.has(item.link)) return;
+        if (!item.precoVista || item.precoVista <= 0) return;
+        
+        seenIds.add(item.link);
+        items.push(item);
+    };
 
-                    const price = obj.offers?.price ? parseFloat(obj.offers.price) : 0;
-                    
-                    items.push({
-                        id: link,
-                        nome: obj.name,
-                        codigo: "N/A",
-                        marca: "Leveros",
-                        link: link,
-                        precoVista: price,
-                        precoParcelado: price, // JSON-LD geralmente só traz o preço principal
-                        disponivel: obj.offers?.availability?.includes('InStock') || true,
-                        imagem: obj.image || ""
-                    });
-                    seenIds.add(link);
-                }
-            };
-
-            if (Array.isArray(json)) {
-                // Caso o JSON seja um array direto [Product, Product...]
-                json.forEach(item => extractFromJson(item));
-            } else if (json['@type'] === 'ItemList' && Array.isArray(json.itemListElement)) {
-                // Caso seja uma lista estruturada
-                json.itemListElement.forEach(el => extractFromJson(el.item));
-            } else {
-                extractFromJson(json);
-            }
-        } catch(e) {
-            // Ignora erros de JSON inválido
-        }
-    });
-
-    // Se o JSON-LD pegou itens, ótimo. Mas vamos rodar o visual também para garantir (às vezes o JSON é incompleto)
-    // Se já tiver muitos itens, retornamos.
-    if (items.length > 5) return items;
-
-
-    // --- ESTRATÉGIA 2: SELETORES VISUAIS (CLASSES NUXT) ---
-    // Baseado no HTML: <div class="products__item product-card column">
-    const cards = doc.querySelectorAll('.product-card');
+    // ESTRATÉGIA 1: VISUAL (DOM) - Focado nos cards da Leveros
+    // Seleciona os cards baseados nas classes que vimos no seu código
+    const cards = doc.querySelectorAll('.product-card, .vtex-product-summary-2-x-container');
     
     cards.forEach(card => {
-        // Seletores específicos do Nuxt da Leveros
         const nameEl = card.querySelector('.product-card__bottom__name') || card.querySelector('.vtex-product-summary-2-x-productBrand');
-        const linkEl = card.querySelector('a'); // Geralmente o card todo ou titulo é link
+        const linkEl = card.querySelector('a'); 
         const imgEl = card.querySelector('img');
-        const priceEl = card.querySelector('.prices__price') || card.querySelector('.vtex-product-summary-2-x-sellingPrice');
-        const installmentEl = card.querySelector('.installment'); // Para tentar achar preço parcelado
+        
+        // Seletores de preço específicos da Leveros
+        const priceEl = card.querySelector('.prices__price');
+        const installmentEl = card.querySelector('.installment'); 
 
-        if (nameEl) {
-            const link = linkEl ? linkEl.getAttribute('href') : "";
-            const fullLink = link && !link.startsWith('http') ? `https://www.leveros.com.br${link}` : link;
-
-            if (seenIds.has(fullLink)) return;
+        if (nameEl && linkEl) {
+            let link = linkEl.getAttribute('href');
+            // Corrige link relativo
+            if (link && !link.startsWith('http')) {
+                link = `https://www.leveros.com.br${link.startsWith('/') ? '' : '/'}${link}`;
+            }
 
             let pVista = 0;
             let pParcelado = 0;
 
-            // Extração de preço à vista
+            // Extração Preço à Vista (Ex: R$ 5.129,05)
             if (priceEl) {
-                const priceText = priceEl.innerText.replace(/[^\d,]/g, '').replace(',', '.');
-                pVista = parseFloat(priceText);
+                // Limpa tudo que não é digito ou virgula
+                const cleanPrice = priceEl.innerText.replace(/[^\d,]/g, '').replace(',', '.');
+                pVista = parseFloat(cleanPrice);
+            } else {
+                // Fallback: Tenta achar no texto do card todo
+                const matches = card.innerText.match(/R\$\s?([\d\.]+,\d{2})/g);
+                if (matches) {
+                    const values = matches.map(m => parseFloat(m.replace(/[^\d,]/g, '').replace(',', '.')));
+                    pVista = Math.min(...values);
+                }
             }
 
-            // Extração de preço parcelado (tentativa)
+            // Extração Preço Parcelado
             if (installmentEl) {
-                // Ex: "ou 8x de R$ 674,88" -> pega o valor da parcela e multiplica
-                const text = installmentEl.innerText;
-                const match = text.match(/(\d+)x.*?R\$\s*([\d\.,]+)/);
+                // Lógica: "8x de R$ 674,88"
+                const match = installmentEl.innerText.match(/(\d+)x.*?R\$\s*([\d\.,]+)/);
                 if (match) {
                     const parcelas = parseInt(match[1]);
                     const valorParcela = parseFloat(match[2].replace(/\./g, '').replace(',', '.'));
                     pParcelado = parcelas * valorParcela;
                 }
             }
-            
-            // Se não achou parcelado específico, usa o mesmo do vista como fallback (ou vice-versa)
-            if (pParcelado === 0 && pVista > 0) pParcelado = pVista; 
+
+            // Fallbacks de preço
+            if (pParcelado === 0) pParcelado = pVista;
             if (pVista === 0 && pParcelado > 0) pVista = pParcelado;
 
-            items.push({
-                id: fullLink,
+            addItem({
+                id: link,
                 nome: nameEl.innerText.trim(),
-                codigo: "N/A", // Difícil pegar no visual
+                codigo: "N/A", // Não visível no card
                 marca: "Leveros",
-                link: fullLink,
+                link: link,
                 precoVista: pVista,
                 precoParcelado: pParcelado,
-                disponivel: true, // Se aparece na lista, geralmente está disponível
+                disponivel: true,
                 imagem: imgEl ? imgEl.src : ""
             });
-            seenIds.add(fullLink);
         }
+    });
+
+    // ESTRATÉGIA 2: JSON-LD (Complementar)
+    // Se o visual falhar ou para pegar mais dados
+    const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
+    scripts.forEach(script => {
+        try {
+            const json = JSON.parse(script.innerText);
+            const processObj = (obj) => {
+                if (obj['@type'] === 'Product' && obj.offers) {
+                    const offer = Array.isArray(obj.offers) ? obj.offers[0] : obj.offers;
+                    const price = parseFloat(offer.price);
+                    let url = obj.url || obj['@id'];
+                    if (url && !url.startsWith('http')) url = `https://www.leveros.com.br${url}`;
+
+                    addItem({
+                        id: url,
+                        nome: obj.name,
+                        codigo: obj.sku || "N/A",
+                        marca: obj.brand?.name || "Leveros",
+                        link: url,
+                        precoVista: price,
+                        precoParcelado: price, 
+                        disponivel: offer.availability?.includes('InStock') || true,
+                        imagem: obj.image || ""
+                    });
+                }
+            };
+
+            if (Array.isArray(json)) {
+                json.forEach(item => {
+                    processObj(item); 
+                    // Se for lista
+                    if (item.itemListElement) item.itemListElement.forEach(el => processObj(el.item));
+                });
+            } else {
+                processObj(json);
+            }
+        } catch(e) {}
     });
 
     return items;
@@ -198,27 +200,25 @@ const MarketScraper = () => {
 
     setIsScanning(true);
     setError(null);
-    setProgress("Processando código fonte...");
+    setProgress("Analisando estrutura do HTML...");
     
     try {
-        await new Promise(r => setTimeout(r, 300)); // UI feedback
+        await new Promise(r => setTimeout(r, 500)); 
         
         let extractedItems = [];
         
-        // Verifica qual loja para usar o parser correto (embora Leveros seja o foco)
         if (activeTab === 'leveros') {
             extractedItems = parseLeverosHTML(manualHtml);
         } else {
-            // Parser genérico para outros casos
-            extractedItems = parseLeverosHTML(manualHtml);
+            extractedItems = parseLeverosHTML(manualHtml); // Genérico
         }
 
         if (extractedItems.length > 0) {
             setProducts(extractedItems);
             calculateStats(extractedItems);
-            setProgress(`Sucesso! ${extractedItems.length} produtos identificados.`);
+            setProgress(`Sucesso! ${extractedItems.length} produtos encontrados.`);
         } else {
-            setError("Nenhum produto identificado. Verifique se copiou o HTML correto da página de listagem.");
+            setError("Nenhum produto identificado. Você copiou o HTML correto seguindo as instruções?");
         }
 
     } catch (e) {
@@ -290,7 +290,6 @@ const MarketScraper = () => {
         setProgress(`Página ${page}... (${allCollectedItems.length} itens)`);
         let newData = [];
 
-        // Clima Rio (Automático)
         if (activeTab === 'climario') {
             const from = (page - 1) * 24;
             const to = from + 23;
@@ -331,7 +330,7 @@ const MarketScraper = () => {
       setError(err.message);
     } finally {
       setIsScanning(false);
-      setProgress("Concluído");
+      if (!useManualInput) setProgress("Concluído");
     }
   };
 
@@ -354,19 +353,27 @@ const MarketScraper = () => {
 
   const downloadExcel = () => {
     if (!products.length || !window.XLSX) return;
-    const ws = window.XLSX.utils.json_to_sheet(products.map(p => ({
-        "Loja": STORES[activeTab].name,
-        "Produto": p.nome,
+    const storeName = STORES[activeTab].name;
+
+    const dataForExcel = products.map(p => ({
+        "Loja": storeName,
+        "Nome do Produto": p.nome,
         "Marca": p.marca,
-        "Ref": p.codigo,
-        "À Vista": p.precoVista,
-        "Parcelado": p.precoParcelado,
+        "Referência": p.codigo,
+        "Preço à Vista (R$)": p.precoVista,
+        "Preço Parcelado (R$)": p.precoParcelado,
         "Disponível": p.disponivel ? "Sim" : "Não",
         "Link": p.link
-    })));
-    const wb = window.XLSX.utils.book_new();
-    window.XLSX.utils.book_append_sheet(wb, ws, "Dados");
-    window.XLSX.writeFile(wb, `${activeTab}_${Date.now()}.xlsx`);
+    }));
+
+    if (window.XLSX) {
+        const ws = window.XLSX.utils.json_to_sheet(dataForExcel);
+        const wscols = [{wch: 10}, {wch: 50}, {wch: 15}, {wch: 20}, {wch: 15}, {wch: 15}, {wch: 10}, {wch: 60}];
+        ws['!cols'] = wscols;
+        const wb = window.XLSX.utils.book_new();
+        window.XLSX.utils.book_append_sheet(wb, ws, "Dados");
+        window.XLSX.writeFile(wb, `${activeTab}_${Date.now()}.xlsx`);
+    }
   };
 
   const filtered = products.filter(p => 
@@ -413,10 +420,11 @@ const MarketScraper = () => {
                     <label className="block text-sm font-bold text-slate-700 mb-2">
                         Instruções para {STORES[activeTab].name}:
                         <span className="font-normal block text-slate-500 mt-1">
-                            1. Acesse a página da categoria no navegador.<br/>
-                            2. Role até o fim para carregar todos os produtos.<br/>
-                            3. Aperte <strong>Ctrl+U</strong> (Ver código fonte) &rarr; <strong>Ctrl+A</strong> (Selecionar tudo) &rarr; <strong>Ctrl+C</strong>.<br/>
-                            4. Cole tudo na caixa abaixo e clique em Processar.
+                            1. No site, role até o fim para carregar <strong>TODOS</strong> os produtos.<br/>
+                            2. Clique com botão direito em qualquer produto &rarr; <strong>Inspecionar</strong>.<br/>
+                            3. Suba a tela do código até achar a tag <code>&lt;html&gt;</code>.<br/>
+                            4. Botão direito em <code>&lt;html&gt;</code> &rarr; <strong>Copy</strong> &rarr; <strong>Copy outerHTML</strong>.<br/>
+                            5. Cole tudo abaixo e clique em Processar.
                         </span>
                     </label>
                     <textarea 
