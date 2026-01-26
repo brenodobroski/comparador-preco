@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Download, RefreshCw, AlertCircle, Package, StopCircle, Loader2, ShieldCheck, Zap, MousePointerClick, Copy, Table as TableIcon, Search, ExternalLink, Store, WifiOff, FileSpreadsheet, CreditCard, Banknote, Code, FileCode } from 'lucide-react';
+import { Download, RefreshCw, AlertCircle, Package, StopCircle, Loader2, ShieldCheck, Zap, MousePointerClick, Copy, Table as TableIcon, Search, ExternalLink, Store, WifiOff, FileSpreadsheet, CreditCard, Banknote, Code, FileCode, Trash2, Database } from 'lucide-react';
 
 const MarketScraper = () => {
   const [activeTab, setActiveTab] = useState('climario'); 
@@ -33,7 +33,6 @@ const MarketScraper = () => {
         setError("Erro ao carregar biblioteca de Excel. Verifique sua internet.");
     };
     document.body.appendChild(script);
-    // Não removemos o script no cleanup para evitar recarregamento desnecessário
   }, []);
 
   const STORES = {
@@ -73,47 +72,121 @@ const MarketScraper = () => {
     }
   };
 
-  // --- PARSER LEVEROS CORRIGIDO ---
+  // --- PARSER LEVEROS (FILTRO RIGOROSO DE PREÇO) ---
   const parseLeverosHTML = (html) => {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
     const items = [];
     const seenIds = new Set(); 
 
-    // Função auxiliar para adicionar item
+    const normalizeLink = (link) => {
+        if (!link) return "";
+        try {
+            const fullLink = link.startsWith('http') ? link : `https://www.leveros.com.br${link.startsWith('/') ? '' : '/'}${link}`;
+            return fullLink;
+        } catch (e) { return link; }
+    };
+
     const addItem = (item) => {
-        if (!item.link || seenIds.has(item.link)) return;
-        // Filtro Crítico: Preço deve ser maior que zero
+        // Validação mínima
+        if (!item.nome || item.nome.length < 3) return;
+        
+        // FILTRO CRÍTICO: SÓ ACEITA SE TIVER PREÇO REAL
         if (!item.precoVista || item.precoVista <= 0) return;
         
-        seenIds.add(item.link);
+        // Garante link absoluto
+        item.link = normalizeLink(item.link);
+        
+        // Chave única: Link (se houver) ou Nome + Preço
+        const uniqueKey = item.link || (item.nome + item.precoVista);
+        
+        if (seenIds.has(uniqueKey)) return;
+        seenIds.add(uniqueKey);
+        
         items.push(item);
     };
 
-    // ESTRATÉGIA 1: VISUAL (DOM) - Focado nos cards da Leveros
-    const cards = doc.querySelectorAll('.product-card, .vtex-product-summary-2-x-container');
+    // ESTRATÉGIA 1: JSON-LD (Dados Estruturados - Fonte mais rica)
+    const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
+    scripts.forEach(script => {
+        try {
+            const json = JSON.parse(script.innerText);
+            
+            // Função recursiva para achar produtos em qualquer lugar do JSON
+            const findProductsInJson = (obj) => {
+                if (!obj) return;
+                
+                // Se for um objeto de Produto
+                if (obj['@type'] === 'Product') {
+                    const offer = obj.offers ? (Array.isArray(obj.offers) ? obj.offers[0] : obj.offers) : null;
+                    const price = offer ? parseFloat(offer.price) : 0;
+                    
+                    if (price > 0) {
+                        addItem({
+                            id: Math.random(),
+                            nome: obj.name,
+                            codigo: obj.sku || "N/A",
+                            marca: obj.brand?.name || "Leveros",
+                            link: obj.url || obj['@id'] || "",
+                            precoVista: price,
+                            precoParcelado: price, // JSON-LD não difere, ajustamos depois
+                            disponivel: true, // Se tem preço, consideramos disponível
+                            imagem: obj.image || ""
+                        });
+                    }
+                }
+                
+                // Se for lista, navega
+                if (Array.isArray(obj)) {
+                    obj.forEach(child => findProductsInJson(child));
+                } else if (typeof obj === 'object') {
+                    if (obj.itemListElement) findProductsInJson(obj.itemListElement);
+                    if (obj.item) findProductsInJson(obj.item);
+                }
+            };
+
+            findProductsInJson(json);
+        } catch(e) {}
+    });
+
+    console.log(`[DEBUG] JSON-LD encontrou: ${items.length} itens.`);
+
+    // ESTRATÉGIA 2: SELETORES VISUAIS GENÉRICOS (Pega tudo que sobrou)
+    const selectors = [
+        '.product-card', 
+        '.vtex-product-summary-2-x-container', 
+        '.shelf-item',
+        '.shelf-product-item',
+        'div[class*="product-card"]',
+        'li[layout]'
+    ];
+    
+    const cards = doc.querySelectorAll(selectors.join(', '));
     
     cards.forEach(card => {
-        const nameEl = card.querySelector('.product-card__bottom__name') || card.querySelector('.vtex-product-summary-2-x-productBrand');
+        const nameEl = card.querySelector('.product-card__bottom__name') || 
+                       card.querySelector('.vtex-product-summary-2-x-productBrand') ||
+                       card.querySelector('h2') || 
+                       card.querySelector('.product-name');
+        
         const linkEl = card.querySelector('a'); 
         const imgEl = card.querySelector('img');
         
-        const priceEl = card.querySelector('.prices__price');
+        const priceEl = card.querySelector('.prices__price, .vtex-product-summary-2-x-sellingPrice');
         const installmentEl = card.querySelector('.installment'); 
 
-        if (nameEl && linkEl) {
-            let link = linkEl.getAttribute('href');
-            if (link && !link.startsWith('http')) {
-                link = `https://www.leveros.com.br${link.startsWith('/') ? '' : '/'}${link}`;
-            }
-
+        if (nameEl) {
             let pVista = 0;
             let pParcelado = 0;
 
+            // Extração Preço 1
             if (priceEl) {
                 const cleanPrice = priceEl.innerText.replace(/[^\d,]/g, '').replace(',', '.');
                 pVista = parseFloat(cleanPrice);
-            } else {
+            }
+            
+            // Extração Preço 2 (Regex no texto todo)
+            if (!pVista) {
                 const matches = card.innerText.match(/R\$\s?([\d\.]+,\d{2})/g);
                 if (matches) {
                     const values = matches.map(m => parseFloat(m.replace(/[^\d,]/g, '').replace(',', '.')));
@@ -121,6 +194,7 @@ const MarketScraper = () => {
                 }
             }
 
+            // Extração Parcelado
             if (installmentEl) {
                 const match = installmentEl.innerText.match(/(\d+)x.*?R\$\s*([\d\.,]+)/);
                 if (match) {
@@ -133,57 +207,23 @@ const MarketScraper = () => {
             if (pParcelado === 0) pParcelado = pVista;
             if (pVista === 0 && pParcelado > 0) pVista = pParcelado;
 
-            addItem({
-                id: link,
-                nome: nameEl.innerText.trim(),
-                codigo: "N/A", 
-                marca: "Leveros",
-                link: link,
-                precoVista: pVista,
-                precoParcelado: pParcelado,
-                disponivel: true,
-                imagem: imgEl ? imgEl.src : ""
-            });
+            if (pVista > 0) {
+                addItem({
+                    id: Math.random(),
+                    nome: nameEl.innerText.trim(),
+                    codigo: "N/A", 
+                    marca: "Leveros",
+                    link: linkEl ? linkEl.getAttribute('href') : "",
+                    precoVista: pVista,
+                    precoParcelado: pParcelado,
+                    disponivel: true,
+                    imagem: imgEl ? imgEl.src : ""
+                });
+            }
         }
     });
 
-    // ESTRATÉGIA 2: JSON-LD (Complementar)
-    const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
-    scripts.forEach(script => {
-        try {
-            const json = JSON.parse(script.innerText);
-            const processObj = (obj) => {
-                if (obj['@type'] === 'Product' && obj.offers) {
-                    const offer = Array.isArray(obj.offers) ? obj.offers[0] : obj.offers;
-                    const price = parseFloat(offer.price);
-                    let url = obj.url || obj['@id'];
-                    if (url && !url.startsWith('http')) url = `https://www.leveros.com.br${url}`;
-
-                    addItem({
-                        id: url,
-                        nome: obj.name,
-                        codigo: obj.sku || "N/A",
-                        marca: obj.brand?.name || "Leveros",
-                        link: url,
-                        precoVista: price,
-                        precoParcelado: price, 
-                        disponivel: offer.availability?.includes('InStock') || true,
-                        imagem: obj.image || ""
-                    });
-                }
-            };
-
-            if (Array.isArray(json)) {
-                json.forEach(item => {
-                    processObj(item); 
-                    if (item.itemListElement) item.itemListElement.forEach(el => processObj(el.item));
-                });
-            } else {
-                processObj(json);
-            }
-        } catch(e) {}
-    });
-
+    console.log(`[DEBUG] Total após Visual: ${items.length} itens.`);
     return items;
   };
 
@@ -196,10 +236,10 @@ const MarketScraper = () => {
 
     setIsScanning(true);
     setError(null);
-    setProgress("Analisando estrutura do HTML...");
+    setProgress("Minerando HTML (Filtrando apenas com preço)...");
     
     try {
-        await new Promise(r => setTimeout(r, 500)); 
+        await new Promise(r => setTimeout(r, 200)); 
         
         let extractedItems = [];
         
@@ -209,12 +249,15 @@ const MarketScraper = () => {
             extractedItems = parseLeverosHTML(manualHtml); 
         }
 
-        if (extractedItems.length > 0) {
-            setProducts(extractedItems);
-            calculateStats(extractedItems);
-            setProgress(`Sucesso! ${extractedItems.length} produtos encontrados.`);
+        // Filtro final redundante: só aceita itens com preço > 0
+        const validItems = extractedItems.filter(i => i.precoVista > 0);
+
+        if (validItems.length > 0) {
+            setProducts(validItems);
+            calculateStats(validItems);
+            setProgress(`Sucesso! ${validItems.length} produtos válidos encontrados.`);
         } else {
-            setError("Nenhum produto identificado. Você copiou o HTML correto seguindo as instruções?");
+            setError("Nenhum produto com preço encontrado. Verifique o HTML copiado.");
         }
 
     } catch (e) {
@@ -310,7 +353,7 @@ const MarketScraper = () => {
         }
 
         if (newData.length > 0) {
-            // Filtro aqui também para garantir
+            // Filtro para Clima Rio: Só aceita se tiver preço
             const validData = newData.filter(p => p.precoVista > 0);
             allCollectedItems = [...allCollectedItems, ...validData];
             setProducts([...allCollectedItems]);
@@ -342,11 +385,13 @@ const MarketScraper = () => {
 
   const copyToClipboard = () => {
     if (products.length === 0) return;
-    const text = ["Nome\tMarca\tRef\tÀ Vista\tParcelado\tLink", 
-        ...products.map(p => `${p.nome}\t${p.marca}\t${p.codigo}\t${p.precoVista}\t${p.precoParcelado}\t${p.link}`)
-    ].join('\n');
+    const headers = ["Nome", "Marca", "Ref", "Preço à Vista", "Preço Parcelado", "Link"];
+    const rows = filteredProducts.map(p => 
+      `${p.nome}\t${p.marca}\t${p.codigo}\t${p.precoVista.toString().replace('.', ',')}\t${p.precoParcelado.toString().replace('.', ',')}\t${p.link}`
+    );
+    const text = [headers.join('\t'), ...rows].join('\n');
     navigator.clipboard.writeText(text);
-    alert("Copiado!");
+    alert("Dados copiados!");
   };
 
   const downloadExcel = () => {
@@ -370,7 +415,7 @@ const MarketScraper = () => {
             "Referência": p.codigo,
             "Preço à Vista (R$)": p.precoVista,
             "Preço Parcelado (R$)": p.precoParcelado,
-            "Disponível": p.disponivel ? "Sim" : "Não",
+            "Disponível": "Sim", // Se tem preço, está disponível
             "Link": p.link
         }));
 
@@ -427,29 +472,40 @@ const MarketScraper = () => {
 
             {useManualInput ? (
                 <div className="animate-in fade-in slide-in-from-top-2 p-4 bg-slate-50 rounded-xl border border-slate-200">
-                    <label className="block text-sm font-bold text-slate-700 mb-2">
-                        Instruções para {STORES[activeTab].name}:
-                        <span className="font-normal block text-slate-500 mt-1">
-                            1. No site, role até o fim para carregar <strong>TODOS</strong> os produtos.<br/>
-                            2. Clique com botão direito em qualquer produto &rarr; <strong>Inspecionar</strong>.<br/>
-                            3. Suba a tela do código até achar a tag <code>&lt;html&gt;</code>.<br/>
-                            4. Botão direito em <code>&lt;html&gt;</code> &rarr; <strong>Copy</strong> &rarr; <strong>Copy outerHTML</strong>.<br/>
-                            5. Cole tudo abaixo e clique em Processar.
-                        </span>
-                    </label>
+                    <div className="flex justify-between items-end mb-2">
+                        <label className="block text-sm font-bold text-slate-700">
+                            Cole o HTML aqui:
+                        </label>
+                        <div className="flex items-center gap-3">
+                             <span className="text-xs text-slate-500 font-mono">
+                                Capacidade: ~10MB (Aprox. 500 produtos)
+                            </span>
+                            <span className="text-xs text-blue-600 font-bold font-mono">
+                                {manualHtml.length.toLocaleString()} caracteres
+                            </span>
+                        </div>
+                    </div>
+                    {/* MaxLength aumentado para suportar HTMLs gigantes */}
                     <textarea 
                         value={manualHtml}
+                        maxLength={50000000} 
                         onChange={(e) => setManualHtml(e.target.value)}
                         className="w-full h-48 p-3 border border-slate-300 rounded-lg text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500 mb-3"
-                        placeholder="Cole o código HTML gigante aqui..."
+                        placeholder="1. Role a página até o fim. 2. Inspecionar Elemento -> <html> -> Copy outerHTML. 3. Cole aqui."
                     />
-                    <div className="flex justify-end">
+                    <div className="flex justify-between">
+                         <button 
+                            onClick={() => setManualHtml('')} 
+                            className="flex items-center gap-2 px-4 py-2 text-slate-500 hover:text-red-600 text-sm font-medium"
+                        >
+                            <Trash2 className="w-4 h-4" /> Limpar
+                        </button>
                         <button 
                             onClick={scanAllProducts} 
                             disabled={!manualHtml || isScanning}
                             className="flex items-center gap-2 px-8 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-bold shadow-sm"
                         >
-                            <Zap className="w-4 h-4" /> Processar Dados
+                            <Zap className="w-4 h-4" /> Processar HTML (Extrair Tudo)
                         </button>
                     </div>
                 </div>
@@ -503,8 +559,12 @@ const MarketScraper = () => {
                                     <span className="line-clamp-2" title={p.nome}>{p.nome}</span>
                                 </td>
                                 <td className="p-3 font-mono text-xs text-slate-500">{p.codigo}</td>
-                                <td className="p-3 text-right font-bold text-green-700 bg-green-50/30">{p.precoVista?.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</td>
-                                <td className="p-3 text-right text-slate-600">{p.precoParcelado?.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</td>
+                                <td className={`p-3 text-right font-bold ${p.precoVista > 0 ? 'text-green-700 bg-green-50/30' : 'text-red-400'}`}>
+                                    {p.precoVista > 0 ? p.precoVista.toLocaleString('pt-BR', {minimumFractionDigits: 2}) : 'R$ 0,00'}
+                                </td>
+                                <td className="p-3 text-right text-slate-600">
+                                    {p.precoParcelado > 0 ? p.precoParcelado.toLocaleString('pt-BR', {minimumFractionDigits: 2}) : '-'}
+                                </td>
                                 <td className="p-3 text-center">
                                     <a href={p.link} target="_blank" rel="noreferrer" className="text-blue-600 hover:bg-blue-100 p-1.5 rounded-md inline-block"><ExternalLink className="w-4 h-4" /></a>
                                 </td>
